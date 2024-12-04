@@ -5,7 +5,6 @@ import time
 import queue
 import numpy as np
 import cv2
-import open3d as o3d
 import threading
 
 client = carla.Client('localhost', 2000)
@@ -45,18 +44,25 @@ imu_sensor = world.spawn_actor(imu_bp, imu_transform, attach_to=vehicle)
 
 #라이다 센서 추가
 lidar_bp = bp_lib.find('sensor.lidar.ray_cast')
-lidar_bp.set_attribute('range', '50') #라이다 범위 (미터)
+lidar_bp.set_attribute('range', '150') #라이다 범위 (미터)
 lidar_bp.set_attribute('rotation_frequency', '20') #회전 속도 (Hz)
 lidar_bp.set_attribute('channels', '32') #채널수
-lidar_bp.set_attribute('points_per_second', '56000') #초당 포인트 수
+lidar_bp.set_attribute('points_per_second', '640000') #초당 포인트 수
 lidar_transform = carla.Transform(carla.Location(x=0.0, z=2.5)) #차량 위에 설치
 lidar_sensor = world.spawn_actor(lidar_bp, lidar_transform, attach_to=vehicle)
 
-#open3d 시각화 설정
-vis = o3d.visualization.Visualizer()
-vis.create_window(window_name="LiDar Point Cloud", width=800, height=600, visible=True)
-pcd = o3d.geometry.PointCloud()
-vis.add_geometry(pcd)
+#레이더 센서 추가
+rander_bp = bp_lib.find('sensor.other.radar')
+#레이더 속성 설정
+rander_bp.set_attribute('horizontal_fov', '35') #수평 시야각 
+rander_bp.set_attribute('vertical_fov', '20') #수직 시야각
+rander_bp.set_attribute('range', '50') #레이더 범위
+#레이더 센서의 위치와 방향 설정
+radar_transform = carla.Transform(carla.Location(x=2.5, z=1.0))  # 차량 전방에 부착
+radar_sensor = world.spawn_actor(rander_bp, radar_transform, attach_to=vehicle)
+
+# LiDAR 데이터 큐
+lidar_queue = queue.Queue()
 
 #오토파일럿 세팅
 vehicle.set_autopilot(True)
@@ -131,30 +137,38 @@ def process_lidar_data(lidar_data):
     points = np.reshape(points, (int(len(points)/ 4), 4)) # (x, y, z, intensity)
     return points[:, :3] #(x, y, z) 좌표만 변환
 
-# LiDAR 데이터 업데이트 함수
-def update_lidar(points):
-    pcd.points = o3d.utility.Vector3dVector(points)
-    vis.update_geometry(pcd)
+# LiDAR 데이터 시각화 함수 (최적화 적용)
+def visualize_lidar_with_opencv(points, img_size=500):
+    lidar_2d = np.zeros((img_size, img_size, 3), dtype=np.uint8)
 
+    # 포인트를 이미지 좌표로 변환 (벡터화 처리)
+    mask = (-50 < points[:, 0]) & (points[:, 0] < 50) & (-50 < points[:, 1]) & (points[:, 1] < 50)
+    points = points[mask]  # 범위 필터링
+    u = ((points[:, 0] + 50) / 100 * img_size).astype(np.int32)
+    v = ((points[:, 1] + 50) / 100 * img_size).astype(np.int32)
+
+    # 이미지 좌표에 포인트 표시
+    lidar_2d[v, u] = (255, 255, 255)
+
+    cv2.imshow("LiDAR View", lidar_2d)
+    cv2.waitKey(1)
 
 # LiDAR 데이터 리스너
 def lidar_callback(lidar_data):
     points = process_lidar_data(lidar_data)
-    update_lidar(points)
+    if not lidar_queue.full():
+        lidar_queue.put(points)
 
-# Open3D 비동기 렌더링 루프
-def open3d_render_loop():
-    while vis.poll_events():
-        vis.update_renderer()
-
-# 비동기 스레드 시작
-render_thread = threading.Thread(target=open3d_render_loop, daemon=True)
-render_thread.start()
-
-# LiDAR 데이터 수신 시작
-lidar_sensor.listen(lidar_callback)
-
-
+#레이더 데이터 처리
+def process_radar_data(radar_data):
+    for detection in radar_data:
+        #물체 정보 추출
+        velocity = detection.velocity #상태 속도 (m/s)
+        azimuth = detection.azimuth #수평 각도 (rad)
+        altitude = detection.altitude #수직 각도 (rad)
+        depth = detection.depth #거리 (m)
+        print(f"Velocity : {velocity:.2f} m/s, Azimuth : {azimuth:.2f} rad, Altitude : {altitude:.2f} rad, Depth: {depth:.2f} m")
+        
 # Get the attributes from the camera
 image_w = camera_bp.get_attribute("image_size_x").as_int()
 image_h = camera_bp.get_attribute("image_size_y").as_int()
@@ -183,6 +197,19 @@ for i in range(50):
 imu_sensor.listen(process_imu_data)
 #라이다 데이터 시작
 lidar_sensor.listen(lidar_callback)
+#레이더 데이터 수집 시작
+radar_sensor.listen(process_radar_data)
+
+# 데이터 수집 및 시각화 루프
+def lidar_visualization_loop():
+    while True:
+        if not lidar_queue.empty():
+            points = lidar_queue.get()
+            visualize_lidar_with_opencv(points)
+
+# 시각화 스레드 실행
+visualization_thread = threading.Thread(target=lidar_visualization_loop, daemon=True)
+visualization_thread.start()
 
 
 try:
@@ -219,8 +246,7 @@ try:
 finally:
     for actor in actors:
         if actor.is_alive:
-            actor.destory()
+            actor.destroy()
 
     #cv2 닫기
     cv2.destroyAllWindows()
-    vis.destroy_window()
