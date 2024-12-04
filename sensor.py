@@ -5,6 +5,8 @@ import time
 import queue
 import numpy as np
 import cv2
+import open3d as o3d
+import threading
 
 client = carla.Client('localhost', 2000)
 world  = client.get_world()
@@ -33,6 +35,29 @@ camera = world.spawn_actor(camera_bp, camera_init_trans, attach_to=vehicle)
 left_mirror_camera = world.spawn_actor(camera_bp, left_mirror_camera_transform, attach_to=vehicle)
 right_mirror_camera = world.spawn_actor(camera_bp, right_mirror_camera_transform, attach_to=vehicle)
 rear_camera = world.spawn_actor(camera_bp, rear_camera_transform, attach_to=vehicle)
+
+#imu sensor 추가
+imu_bp = bp_lib.find('sensor.other.imu')
+#imu센서 위치 설정 (차량 중심부에 장착)
+imu_transform = carla.Transform(carla.Location(x=0.0, y=0.0, z=1.0))
+#imu 센서 차량에 부착
+imu_sensor = world.spawn_actor(imu_bp, imu_transform, attach_to=vehicle)
+
+#라이다 센서 추가
+lidar_bp = bp_lib.find('sensor.lidar.ray_cast')
+lidar_bp.set_attribute('range', '50') #라이다 범위 (미터)
+lidar_bp.set_attribute('rotation_frequency', '20') #회전 속도 (Hz)
+lidar_bp.set_attribute('channels', '32') #채널수
+lidar_bp.set_attribute('points_per_second', '56000') #초당 포인트 수
+lidar_transform = carla.Transform(carla.Location(x=0.0, z=2.5)) #차량 위에 설치
+lidar_sensor = world.spawn_actor(lidar_bp, lidar_transform, attach_to=vehicle)
+
+#open3d 시각화 설정
+vis = o3d.visualization.Visualizer()
+vis.create_window(window_name="LiDar Point Cloud", width=800, height=600, visible=True)
+pcd = o3d.geometry.PointCloud()
+vis.add_geometry(pcd)
+
 #오토파일럿 세팅
 vehicle.set_autopilot(True)
 
@@ -87,6 +112,49 @@ def get_image_point(loc, K, w2c):
 
         return point_img[0:2]
 
+#imu 센서 수집
+def process_imu_data(imu_data):
+    #가속도 정보 (m/s^2)
+    accel = imu_data.accelerometer
+    #각속도 정보 (rad/s)
+    gyro = imu_data.gyroscope
+    #방향 정보 (롤, 피치, 요)
+    compass = imu_data.compass
+
+    print(f"Acceleration : {accel}")
+    print(f"Gyroscope : {gyro}")
+    print(f"Compass : {compass}")
+
+#라이다 데이터 처리 함수
+def process_lidar_data(lidar_data):
+    points = np.frombuffer(lidar_data.raw_data, dtype=np.float32)
+    points = np.reshape(points, (int(len(points)/ 4), 4)) # (x, y, z, intensity)
+    return points[:, :3] #(x, y, z) 좌표만 변환
+
+# LiDAR 데이터 업데이트 함수
+def update_lidar(points):
+    pcd.points = o3d.utility.Vector3dVector(points)
+    vis.update_geometry(pcd)
+
+
+# LiDAR 데이터 리스너
+def lidar_callback(lidar_data):
+    points = process_lidar_data(lidar_data)
+    update_lidar(points)
+
+# Open3D 비동기 렌더링 루프
+def open3d_render_loop():
+    while vis.poll_events():
+        vis.update_renderer()
+
+# 비동기 스레드 시작
+render_thread = threading.Thread(target=open3d_render_loop, daemon=True)
+render_thread.start()
+
+# LiDAR 데이터 수신 시작
+lidar_sensor.listen(lidar_callback)
+
+
 # Get the attributes from the camera
 image_w = camera_bp.get_attribute("image_size_x").as_int()
 image_h = camera_bp.get_attribute("image_size_y").as_int()
@@ -110,6 +178,12 @@ for i in range(50):
     if npc:
         actors.append(npc)
         npc.set_autopilot(True)
+
+# IMU 데이터 수집 시작
+imu_sensor.listen(process_imu_data)
+#라이다 데이터 시작
+lidar_sensor.listen(lidar_callback)
+
 
 try:
     while True:
@@ -149,7 +223,4 @@ finally:
 
     #cv2 닫기
     cv2.destroyAllWindows()
-
-    settings.synchronous_mode = False
-    settings.fixed_delta_seconds = None
-    world.apply_+settings(settings)
+    vis.destroy_window()
