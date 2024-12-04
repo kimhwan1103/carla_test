@@ -13,10 +13,14 @@ bp_lib = world.get_blueprint_library()
 # Get the map spawn points
 spawn_points = world.get_map().get_spawn_points()
 
+actors = []
+
 # spawn vehicle
 #vehicle_bp =bp_lib.find('vehicle.lincoln.mkz_2020')
 vehicle_bp =bp_lib.find('vehicle.tesla.model3')
 vehicle = world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
+if vehicle:
+    actors.append(vehicle)
 
 # spawn camera
 camera_bp = bp_lib.find('sensor.camera.rgb')
@@ -104,35 +108,48 @@ for i in range(50):
     vehicle_bp = random.choice(bp_lib.filter('vehicle'))
     npc = world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
     if npc:
+        actors.append(npc)
         npc.set_autopilot(True)
 
-while True:
+try:
+    while True:
 
-    # Retrieve and reshape the image
-    world.tick(0.1)
-    image = image_queue.get()
-    left_image = left_image_queue.get()
-    rigtht_image = right_image_queue.get()
-    rear_image = rear_image_queue.get()
+        # Retrieve and reshape the image
+        world.tick(0.1)
+        image = image_queue.get()
+        left_image = left_image_queue.get()
+        rigtht_image = right_image_queue.get()
+        rear_image = rear_image_queue.get()
 
-    img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
-    left_img = np.reshape(np.copy(left_image.raw_data), (left_image.height, left_image.width, 4))
-    right_img = np.reshape(np.copy(rigtht_image.raw_data), (rigtht_image.height, rigtht_image.width, 4))
-    rear_img = np.reshape(np.copy(rear_image.raw_data), (rear_image.height, rear_image.width, 4))
+        img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
+        left_img = np.reshape(np.copy(left_image.raw_data), (left_image.height, left_image.width, 4))
+        right_img = np.reshape(np.copy(rigtht_image.raw_data), (rigtht_image.height, rigtht_image.width, 4))
+        rear_img = np.reshape(np.copy(rear_image.raw_data), (rear_image.height, rear_image.width, 4))
 
-    # Get the camera matrix 
-    world_2_camera = np.array(camera.get_transform().get_inverse_matrix())
-    world_2_left_carmea = np.array(left_mirror_camera.get_transform().get_inverse_matrix())
-    world_2_right_mirror_camera = np.array(right_mirror_camera.get_transform().get_inverse_matrix())
-    world_2_rear_camera = np.array(rear_camera.get_transform().get_inverse_matrix())
+        # Get the camera matrix 
+        world_2_camera = np.array(camera.get_transform().get_inverse_matrix())
+        world_2_left_carmea = np.array(left_mirror_camera.get_transform().get_inverse_matrix())
+        world_2_right_mirror_camera = np.array(right_mirror_camera.get_transform().get_inverse_matrix())
+        world_2_rear_camera = np.array(rear_camera.get_transform().get_inverse_matrix())
 
-    #출력
-    top_row = cv2.hconcat([img, rear_img])
-    bottom_row = cv2.hconcat([left_img, right_img])
-    combined_image = cv2.vconcat([top_row, bottom_row])
+        #출력
+        top_row = cv2.hconcat([img, rear_img])
+        bottom_row = cv2.hconcat([left_img, right_img])
+        combined_image = cv2.vconcat([top_row, bottom_row])
 
-    cv2.imshow("Multi-Camera View", combined_image)
+        cv2.imshow("Multi-Camera View", combined_image)
 
-    if cv2.waitKey(1) == ord('q'):
-        break
-cv2.destroyAllWindows()
+        if cv2.waitKey(1) == ord('q'):
+            break
+
+finally:
+    for actor in actors:
+        if actor.is_alive:
+            actor.destory()
+
+    #cv2 닫기
+    cv2.destroyAllWindows()
+
+    settings.synchronous_mode = False
+    settings.fixed_delta_seconds = None
+    world.apply_+settings(settings)
