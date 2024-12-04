@@ -6,6 +6,35 @@ import queue
 import numpy as np
 import cv2
 import threading
+import json
+import os
+
+#opencv videowriter 설정
+output_file = 'carla_output.avi'
+output_video_dir = "output_video"
+os.makedirs(output_video_dir, exist_ok=True)
+fourcc =  cv2.VideoWriter_fourcc(*'XVID')
+fps = 30.0
+frame_size = (1280, 720)
+video_writer = cv2.VideoWriter(output_file, fourcc, fps, frame_size)
+
+#데이터셋 저장 디렉토리 설정 
+output_dir = "sensor_data"
+os.makedirs(output_dir, exist_ok=True)
+
+#데이터 저장 함수
+def save_to_json(data, filename):
+    filepath = os.path.join(output_dir, filename)
+    with open(filepath, 'w') as json_file:
+        json.dump(data, json_file, indent=4)
+    print(f"Data saved to {filepath}")
+
+#IMU 데이터 수집 및 저장
+imu_data_list = []
+#라이다 데이터 수집 및 저장
+lidar_data_list = []
+#레이더 데이터 수집 및 저장
+radar_data_list = []
 
 client = carla.Client('localhost', 2000)
 world  = client.get_world()
@@ -25,6 +54,9 @@ if vehicle:
 
 # spawn camera
 camera_bp = bp_lib.find('sensor.camera.rgb')
+camera_bp.set_attribute('image_size_x', '1280')
+camera_bp.set_attribute('image_size_y', '720')
+camera_bp.set_attribute('fov', '90')
 camera_init_trans = carla.Transform(carla.Location(x=2.5, z=1.5))
 left_mirror_camera_transform = carla.Transform(carla.Location(x=-0.5, y=-1.0, z=1.0), carla.Rotation(pitch=0, yaw=180, roll=0))  # 왼쪽 사이드미러
 right_mirror_camera_transform = carla.Transform(carla.Location(x=-0.5, y=1.0, z=1.0), carla.Rotation(pitch=0, yaw=180, roll=0))  # 오른쪽 사이드미러
@@ -127,9 +159,26 @@ def process_imu_data(imu_data):
     #방향 정보 (롤, 피치, 요)
     compass = imu_data.compass
 
-    print(f"Acceleration : {accel}")
-    print(f"Gyroscope : {gyro}")
-    print(f"Compass : {compass}")
+    imu_entry = {
+        "accelerometer": {
+            "x": imu_data.accelerometer.x,
+            "y": imu_data.accelerometer.y,
+            "z": imu_data.accelerometer.z
+        },
+        "gyroscope": {
+            "x": imu_data.gyroscope.x,
+            "y": imu_data.gyroscope.y,
+            "z": imu_data.gyroscope.z
+        },
+        "compass": imu_data.compass
+    }
+    imu_data_list.append(imu_entry)
+    if len(imu_data_list) >= 100:
+        save_to_json(imu_data_list, "imu_dat.json")
+        imu_data_list.clear()
+    #print(f"Acceleration : {accel}")
+    #print(f"Gyroscope : {gyro}")
+    #print(f"Compass : {compass}")
 
 #라이다 데이터 처리 함수
 def process_lidar_data(lidar_data):
@@ -155,20 +204,41 @@ def visualize_lidar_with_opencv(points, img_size=500):
 
 # LiDAR 데이터 리스너
 def lidar_callback(lidar_data):
+    #시각화
+    '''
     points = process_lidar_data(lidar_data)
     if not lidar_queue.full():
         lidar_queue.put(points)
+    '''
+    #저장
+    points = process_lidar_data(lidar_data).tolist()  # Convert NumPy array to list
+    lidar_entry = {"points": points}
+    lidar_data_list.append(lidar_entry)
+    if len(lidar_data_list) >= 10:  # Save every 10 frames
+        save_to_json(lidar_data_list, "lidar_data.json")
+        lidar_data_list.clear()
 
 #레이더 데이터 처리
 def process_radar_data(radar_data):
+    radar_frame = []
     for detection in radar_data:
         #물체 정보 추출
         velocity = detection.velocity #상태 속도 (m/s)
         azimuth = detection.azimuth #수평 각도 (rad)
         altitude = detection.altitude #수직 각도 (rad)
         depth = detection.depth #거리 (m)
-        print(f"Velocity : {velocity:.2f} m/s, Azimuth : {azimuth:.2f} rad, Altitude : {altitude:.2f} rad, Depth: {depth:.2f} m")
-        
+        #print(f"Velocity : {velocity:.2f} m/s, Azimuth : {azimuth:.2f} rad, Altitude : {altitude:.2f} rad, Depth: {depth:.2f} m")
+        radar_frame.append({
+            "velocity": detection.velocity,
+            "azimuth": detection.azimuth,
+            "altitude": detection.altitude,
+            "depth": detection.depth
+        })
+    radar_data_list.append({"detections": radar_frame})
+    if len(radar_data_list) >= 10:  # Save every 10 frames
+        save_to_json(radar_data_list, "radar_data.json")
+        radar_data_list.clear()
+
 # Get the attributes from the camera
 image_w = camera_bp.get_attribute("image_size_x").as_int()
 image_h = camera_bp.get_attribute("image_size_y").as_int()
@@ -211,6 +281,33 @@ def lidar_visualization_loop():
 visualization_thread = threading.Thread(target=lidar_visualization_loop, daemon=True)
 visualization_thread.start()
 
+#비디오 저장
+combined_video = cv2.VideoWriter('toal_camera.avi', fourcc, fps, (2560, 1440))
+front_video = cv2.VideoWriter('front_camera.avi', fourcc, fps, (1280, 720))
+rear_video = cv2.VideoWriter('rear_camera.avi', fourcc, fps, (1280, 720))
+left_video = cv2.VideoWriter('left_camera.avi', fourcc, fps, (1280, 720))
+right_video = cv2.VideoWriter('right_img.avi', fourcc, fps, (1280, 720))
+
+combined_video = cv2.VideoWriter(os.path.join(output_video_dir, 'total_camera.avi'), 
+                                cv2.VideoWriter_fourcc(*'XVID'), 
+                                fps, 
+                                (2560, 1440))
+front_video = cv2.VideoWriter(os.path.join(output_video_dir, 'front_camera.avi'), 
+                             cv2.VideoWriter_fourcc(*'XVID'), 
+                             fps, 
+                             (1280, 720))
+rear_video = cv2.VideoWriter(os.path.join(output_video_dir, 'rear_camera.avi'), 
+                            cv2.VideoWriter_fourcc(*'XVID'), 
+                            fps, 
+                            (1280, 720))
+left_video = cv2.VideoWriter(os.path.join(output_video_dir, 'left_camera.avi'), 
+                            cv2.VideoWriter_fourcc(*'XVID'), 
+                            fps, 
+                            (1280, 720))
+right_video = cv2.VideoWriter(os.path.join(output_video_dir, 'right_camera.avi'), 
+                             cv2.VideoWriter_fourcc(*'XVID'), 
+                             fps, 
+                             (1280, 720))
 
 try:
     while True:
@@ -219,31 +316,51 @@ try:
         world.tick(0.1)
         image = image_queue.get()
         left_image = left_image_queue.get()
-        rigtht_image = right_image_queue.get()
+        right_image = right_image_queue.get()
         rear_image = rear_image_queue.get()
+        
+        img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))[:, :, :3]
+        left_img = np.reshape(np.copy(left_image.raw_data), (left_image.height, left_image.width, 4))[:, :, :3]
+        right_img = np.reshape(np.copy(right_image.raw_data), (right_image.height, right_image.width, 4))[:, :, :3]
+        rear_img = np.reshape(np.copy(rear_image.raw_data), (rear_image.height, rear_image.width, 4))[:, :, :3]
 
-        img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
-        left_img = np.reshape(np.copy(left_image.raw_data), (left_image.height, left_image.width, 4))
-        right_img = np.reshape(np.copy(rigtht_image.raw_data), (rigtht_image.height, rigtht_image.width, 4))
-        rear_img = np.reshape(np.copy(rear_image.raw_data), (rear_image.height, rear_image.width, 4))
-
+        # RGB to BGR 변환
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        left_img = cv2.cvtColor(left_img, cv2.COLOR_RGB2BGR)
+        right_img = cv2.cvtColor(right_img, cv2.COLOR_RGB2BGR)
+        rear_img = cv2.cvtColor(rear_img, cv2.COLOR_RGB2BGR)
+        
+        '''
         # Get the camera matrix 
         world_2_camera = np.array(camera.get_transform().get_inverse_matrix())
         world_2_left_carmea = np.array(left_mirror_camera.get_transform().get_inverse_matrix())
         world_2_right_mirror_camera = np.array(right_mirror_camera.get_transform().get_inverse_matrix())
         world_2_rear_camera = np.array(rear_camera.get_transform().get_inverse_matrix())
+        '''
 
-        #출력
+        #화면 병합
         top_row = cv2.hconcat([img, rear_img])
         bottom_row = cv2.hconcat([left_img, right_img])
         combined_image = cv2.vconcat([top_row, bottom_row])
 
-        cv2.imshow("Multi-Camera View", combined_image)
+        combined_video.write(combined_image)
+        front_video.write(img)
+        rear_video.write(rear_img)
+        right_video.write(right_img)
+        left_video.write(left_img)
 
-        if cv2.waitKey(1) == ord('q'):
-            break
+        #cv2.imshow("Multi-Camera View", combined_image)
+
+        #if cv2.waitKey(1) == ord('q'):
+        #    break
 
 finally:
+    combined_video.release()
+    front_video.release()
+    left_video.release()
+    right_video.release()
+    rear_video.release()
+
     for actor in actors:
         if actor.is_alive:
             actor.destroy()
